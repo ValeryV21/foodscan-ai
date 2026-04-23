@@ -1,0 +1,53 @@
+# ============================================================
+# FoodScan AI — Python зависимости
+# ============================================================
+
+# ===== Основни =====
+streamlit>=1.32.0
+Pillow>=10.0.0
+requests>=2.31.0
+
+# ===== OCR =====
+# Вариант 1: EasyOCR (препоръчително — по-точно, поддържа български)
+easyocr>=1.7.0
+
+# Вариант 2: pytesseract (по-бързо, изисква Tesseract инсталиран)
+# pytesseract>=0.3.10
+# Инсталиране на Tesseract:
+#   Ubuntu/Debian: sudo apt-get install tesseract-ocr tesseract-ocr-bul
+#   macOS: brew install tesseract
+#   Windows: https://github.com/UB-Mannheim/tesseract/wiki
+
+# ===== Баркод сканиране =====
+# pyzbar изисква zbar библиотека:
+#   Ubuntu/Debian: sudo apt-get install libzbar0
+#   macOS: brew install zbar
+#   Windows: включена в pip пакета
+pyzbar>=0.1.9
+
+# ===== Компютърно зрение (алтернативен баркод скенер) =====
+opencv-python-headless>=4.8.0
+
+# ===== Данни и анализ =====
+numpy>=1.24.0
+
+# ===== Опционални (за разширена функционалност) =====
+# pandas>=2.0.0          # За по-напреднала история/статистики
+# matplotlib>=3.7.0      # За графики и визуализации
+# plotly>=5.15.0         # За интерактивни графики в Streamlit
+
+# ============================================================
+# БЪРЗО СТАРТИРАНЕ:
+#
+# 1. Инсталирай зависимостите:
+#    pip install -r requirements.txt
+#
+# 2. Стартирай приложението:
+#    streamlit run app.py
+#
+# 3. За production (с всички OCR функции):
+#    # Ubuntu/Debian:
+#    sudo apt-get install libzbar0 tesseract-ocr tesseract-ocr-bul
+#    pip install -r requirements.txt
+#    streamlit run app.py
+# ============================================================
