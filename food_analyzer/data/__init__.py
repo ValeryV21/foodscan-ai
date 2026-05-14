@@ -1,1 +1,0 @@
-# Food Analyzer Data Package
