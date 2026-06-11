@@ -1,691 +1,858 @@
-import sys, os, io, json, base64, requests, re
-import streamlit as st
-from PIL import Image
-import numpy as np
+"""
+🔍 FoodScan AI - Анализатор на хранителни продукти
+====================================================
+Мобилно приложение за анализ на хранителни продукти чрез:
+- OCR разпознаване на текст от етикети
+- Баркод сканиране
+- Анализ на вредни добавки (E-та)
+- Здравни рискове и алтернативи
 
-# ════════════════════════════════════════════════════════════════════════
-# 1. PAGE CONFIG (Must be first Streamlit command)
-# ════════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="FoodScan AI", page_icon="🔍", layout="centered", initial_sidebar_state="collapsed")
-
-# ════════════════════════════════════════════════════════════════════════
-# 2. DATA & DATABASES
-# ════════════════════════════════════════════════════════════════════════
-MOBILE_CSS = """
-<style>
-    .info-box { background: rgba(0, 184, 148, 0.1); border-left: 4px solid #00b894; padding: 12px; border-radius: 4px; margin-bottom: 16px; }
-    .food-card { background: rgba(255, 255, 255, 0.05); padding: 16px; border-radius: 8px; margin-bottom: 16px; }
-    .ocr-box { background: #1e1e1e; padding: 12px; border-radius: 8px; font-family: monospace; color: #d4d4d4; }
-    .abadge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; margin-bottom: 4px; }
-    .abadge.high { background: #FF3B30; color: white; }
-    .abadge.medium { background: #FF9500; color: white; }
-    .abadge.low { background: #34C759; color: white; }
-</style>
+Технологии: Python + Streamlit + EasyOCR + pyzbar
+Автор: FoodScan AI Team
 """
 
-HARMFUL_ADDITIVES = {
-    "E621": {"code": "E621", "name": "Мононатриев глутамат", "category": "Овкусител", "risk_level": "high", "risk_score": 8, "description": "Подобрител на вкуса.", "health_risks": ["Главоболие", "Затлъстяване"], "banned_in": ["Някои детски храни"], "alternatives": "Естествени подправки", "found_in": ["Чипс", "Снаксове", "Бульони"]},
-    "E951": {"code": "E951", "name": "Аспартам", "category": "Подсладител", "risk_level": "medium-high", "risk_score": 7, "description": "Изкуствен подсладител.", "health_risks": ["Неврологични проблеми"], "banned_in": [], "alternatives": "Стевия", "found_in": ["Диетични напитки", "Дъвки"]},
-    "E330": {"code": "E330", "name": "Лимонена киселина", "category": "Консервант/Регулатор", "risk_level": "low", "risk_score": 1, "description": "Естествена или синтетична киселина.", "health_risks": ["Ерозия на зъбите (в големи количества)"], "banned_in": [], "alternatives": "Пресен лимонов сок", "found_in": ["Напитки", "Сладкиши"]},
-    "E102": {"code": "E102", "name": "Тартразин", "category": "Оцветител", "risk_level": "high", "risk_score": 8, "description": "Синтетичен жълт оцветител.", "health_risks": ["Алергии", "Хиперактивност при деца"], "banned_in": ["Норвегия", "Австрия"], "alternatives": "Естествени оцветители", "found_in": ["Безалкохолни напитки", "Сладки"]},
-    "E250": {"code": "E250", "name": "Натриев нитрит", "category": "Консервант", "risk_level": "high", "risk_score": 9, "description": "Консервант в месни продукти.", "health_risks": ["Канцерогенен риск", "Сърдечно-съдови проблеми"], "banned_in": [], "alternatives": "Натурална консервация", "found_in": ["Колбаси", "Бекон", "Наденици"]},
-    "E211": {"code": "E211", "name": "Натриев бензоат", "category": "Консервант", "risk_level": "medium", "risk_score": 5, "description": "Консервант в напитки и сосове.", "health_risks": ["Алергии", "Хиперактивност"], "banned_in": [], "alternatives": "Витамин C", "found_in": ["Газирани напитки", "Сосове", "Маринати"]},
-    "E320": {"code": "E320", "name": "Бутилхидроксианизол (BHA)", "category": "Антиоксидант", "risk_level": "medium-high", "risk_score": 7, "description": "Синтетичен антиоксидант.", "health_risks": ["Потенциален канцероген"], "banned_in": ["Япония"], "alternatives": "Витамин E", "found_in": ["Чипс", "Бисквити", "Маргарин"]},
-}
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
 
-RISK_COLORS = {"high": "#FF3B30", "medium-high": "#FF3B30", "medium": "#FF9500", "low-medium": "#34C759", "low": "#34C759"}
-RISK_LABELS = {"high": "⛔ Висок риск", "medium-high": "🔴 Повишен риск", "medium": "🟡 Умерен риск", "low-medium": "🟢 Нисък риск", "low": "✅ Безопасен"}
-HEALTH_RISK_INFO = {
-    "obesity": {"name": "Затлъстяване", "emoji": "⚖️", "high": "Високи калории и захари", "medium": "Умерени нива на мазнини", "low": "Нисък риск"},
-    "diabetes": {"name": "Диабет", "emoji": "🩸", "high": "Много добавена захар", "medium": "Средно съдържание на въглехидрати", "low": "Безопасно"},
-    "heart": {"name": "Сърце", "emoji": "❤️", "high": "Високи наситени мазнини", "medium": "Умерени мазнини", "low": "Полезно за сърцето"},
-    "blood_pressure": {"name": "Кръвно налягане", "emoji": "💓", "high": "Високо съдържание на сол", "medium": "Умерено количество сол", "low": "Ниско съдържание на сол"}
-}
+import streamlit as st
+from PIL import Image
+import io
+import json
+import requests
 
-DEMO_BARCODES = {"5449000000996": "Coca-Cola Original", "8000500167104": "Kinder Bueno"}
-MOCK_PRODUCTS = {}
-
-# ════════════════════════════════════════════════════════════════════════
-# 3. HELPER & UI FUNCTIONS
-# ════════════════════════════════════════════════════════════════════════
-def render_header():
-    st.markdown("<h1 style='text-align: center; color: #00b894;'>🔍 FoodScan AI</h1>", unsafe_allow_html=True)
-
-def render_section_title(icon, title):
-    st.markdown(f"### {icon} {title}")
-
-def get_nutriscore_color(score):
-    return {"A": "#038141", "B": "#85BB2F", "C": "#FECB02", "D": "#EE8100", "E": "#E63E11"}.get(score.upper(), "#888")
-
-def render_health_score(score, label, color, emoji):
-    st.markdown(
-        f"<div class='food-card' style='text-align:center; border-top: 4px solid {color};'>"
-        f"<h2 style='color:{color}; margin:0;'>{score}/10 {emoji}</h2>"
-        f"<p style='margin:0; font-weight:bold;'>{label}</p></div>",
-        unsafe_allow_html=True
-    )
-
-def render_risk_card(name, emoji, lvl, desc):
-    color = RISK_COLORS.get(lvl, "#888")
-    st.markdown(
-        f"<div style='padding: 10px; border-left: 4px solid {color}; background: rgba(255,255,255,0.05); margin-bottom:8px;'>"
-        f"<strong>{emoji} {name}</strong>: {desc}</div>",
-        unsafe_allow_html=True
-    )
-
-def render_nutrition_bar(nut, val, unit, pct, col):
-    st.progress(min(pct / 100, 1.0), text=f"{nut}: {val}{unit}")
-
-def render_product_header(name, brand, cat, emoji):
-    st.markdown(f"<h2>{emoji} {name}</h2><p style='color:#888;'>{brand} | {cat}</p>", unsafe_allow_html=True)
-
-def render_history_card(e):
-    st.markdown(f"**{e['product']['name']}** - Оценка: {e['analysis']['health_score']['score']}/10")
-
-def render_alternatives(alts):
-    for a in alts:
-        st.markdown(f"- 🌿 {a}")
-
-def render_ocr_result_with_highlights(text, found_additives):
-    for a in found_additives:
-        color = "#FF3B30" if a["risk_level"] in ["high", "medium-high"] else "#34C759"
-        text = text.replace(
-            a["code"],
-            f"<span style='background-color:{color}; padding:2px; border-radius:3px; color:white;'>{a['code']}</span>"
-        )
-    return text
-
-# ════════════════════════════════════════════════════════════════════════
-# 4. SCANNER & OCR MODULES
-# ════════════════════════════════════════════════════════════════════════
-def get_ocr_status():
-    try:
-        import easyocr
-        return {"easyocr": True, "any_available": True}
-    except ImportError:
-        return {"easyocr": False, "any_available": True}  # Claude fallback
-
-def get_barcode_info():
-    try:
-        import pyzbar
-        return {"pyzbar": True, "opencv": True}
-    except ImportError:
-        return {"pyzbar": False, "opencv": False}
-
-@st.cache_resource
-def get_ocr_reader():
-    try:
-        import easyocr
-        return easyocr.Reader(['bg', 'en']), "easyocr"
-    except ImportError:
-        return None, None
-
-def scan_barcode(image):
-    try:
-        from pyzbar.pyzbar import decode
-        decoded = decode(image)
-        if decoded:
-            return {"found": True, "barcode": decoded[0].data.decode('utf-8'), "barcode_type": decoded[0].type}
-    except ImportError:
-        pass
-    return {"found": False}
-
-def extract_text_easyocr(image, reader):
-    if reader is None:
-        return {"success": False, "error": "EasyOCR не е инсталиран."}
-    res = reader.readtext(np.array(image), detail=0)
-    return {"success": True, "raw_text": " ".join(res), "confidence": 0.85, "engine": "easyocr"}
-
-def extract_text_claude_vision(image):
-    return {"success": False, "error": "Claude Vision изисква API ключ. Моля инсталирайте EasyOCR."}
-
-def fetch_openfoodfacts(barcode):
-    try:
-        url = f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json"
-        res = requests.get(url, timeout=5).json()
-        if res.get("status") == 1:
-            p = res["product"]
-            return {
-                "name": p.get("product_name", "Неизвестен продукт"),
-                "brand": p.get("brands", "Неизвестна марка"),
-                "category": p.get("categories", "Храна").split(",")[0],
-                "ingredients": p.get("ingredients_text", ""),
-                "nutrition": {
-                    "calories": p.get("nutriments", {}).get("energy-kcal_100g", 0),
-                    "fat": p.get("nutriments", {}).get("fat_100g", 0),
-                    "sugars": p.get("nutriments", {}).get("sugars_100g", 0),
-                    "salt": p.get("nutriments", {}).get("salt_100g", 0)
-                },
-                "nutriscore": p.get("nutriscore_grade", "u"),
-                "health_risks": {"obesity": "low", "diabetes": "low", "heart": "low", "blood_pressure": "low"},
-                "alternatives": ["Пресни плодове", "Домашно приготвена храна"]
-            }
-    except Exception:
-        pass
-    return None
-
-def get_product_by_barcode(bc):
-    return MOCK_PRODUCTS.get(bc)
-
-def get_demo_products():
-    return [
-        {"name": "Coca-Cola", "brand": "Кока-Кола", "emoji": "🥤", "barcode": "5449000000996"},
-        {"name": "Kinder Bueno", "brand": "Ferrero", "emoji": "🍫", "barcode": "8000500167104"},
-    ]
-
-# ════════════════════════════════════════════════════════════════════════
-# 5. ANALYSIS & HISTORY
-# ════════════════════════════════════════════════════════════════════════
-def find_additives_in_text(text):
-    found = []
-    for code, data in HARMFUL_ADDITIVES.items():
-        if code in text or data["name"].lower() in text.lower():
-            found.append(data)
-    return found
-
-def get_overall_risk_score(found_additives):
-    if not found_additives:
-        return {"label": "Безопасно", "color": "#34C759"}
-    max_risk = max([a["risk_score"] for a in found_additives])
-    if max_risk >= 7:
-        return {"label": "Висок риск", "color": "#FF3B30"}
-    if max_risk >= 4:
-        return {"label": "Умерен риск", "color": "#FF9500"}
-    return {"label": "Нисък риск", "color": "#34C759"}
-
-def parse_food_label(text):
-    return {"ingredients": text, "product_name": "Продукт от OCR"}
-
-def analyze_product(product_data, ingredients_text):
-    found = find_additives_in_text(ingredients_text)
-    risk = get_overall_risk_score(found)
-
-    score = max(1, 10 - len(found) * 2)
-    color = "#34C759" if score >= 7 else "#FF9500" if score >= 4 else "#FF3B30"
-
-    na = []
-    nut = product_data.get("nutrition", {})
-    if nut.get("calories"):
-        na.append({"nutrient": "Калории", "value": nut["calories"], "unit": "kcal", "percentage_daily": min(100, nut["calories"] / 20), "color": "blue"})
-    if nut.get("fat"):
-        na.append({"nutrient": "Мазнини", "value": nut["fat"], "unit": "g", "percentage_daily": min(100, nut["fat"] / 0.7), "color": "orange"})
-    if nut.get("sugars"):
-        na.append({"nutrient": "Захари", "value": nut["sugars"], "unit": "g", "percentage_daily": min(100, nut["sugars"] / 0.5), "color": "red"})
-    if nut.get("salt"):
-        na.append({"nutrient": "Сол", "value": nut["salt"], "unit": "g", "percentage_daily": min(100, nut["salt"] / 0.06), "color": "purple"})
-
-    return {
-        "product": product_data,
-        "health_score": {
-            "score": score,
-            "label": "Добра" if score >= 7 else "Средна" if score >= 4 else "Лоша",
-            "color": color,
-            "emoji": "🌟",
-            "breakdown": []
-        },
-        "additives": {"count": len(found), "found": found, "risk": risk},
-        "nutrition_analysis": na
+# ============ Конфигурация на страницата ============
+st.set_page_config(
+    page_title="FoodScan AI",
+    page_icon="🔍",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+    menu_items={
+        "Get help": None,
+        "Report a bug": None,
+        "About": "FoodScan AI - Анализирай хранителни продукти за секунди!"
     }
+)
 
-def initialize_history(state):
-    state.setdefault("history", [])
+# ============ Импортиране на вътрешни модули ============
+from utils.ui_helpers import (
+    MOBILE_CSS, render_header, render_health_score,
+    render_additive_badge, render_nutrition_bar, render_risk_card,
+    render_history_card, render_alternatives, render_product_header,
+    render_section_title, get_nutriscore_color
+)
+from data.harmful_additives import (
+    HARMFUL_ADDITIVES, find_additives_in_text,
+    get_overall_risk_score, RISK_COLORS, RISK_LABELS
+)
+from data.product_database import (
+    MOCK_PRODUCTS, HEALTH_RISK_INFO, get_product_by_barcode, get_demo_products
+)
+from modules.barcode_scanner import scan_barcode, fetch_openfoodfacts, DEMO_BARCODES, get_barcode_info
+from modules.ocr_scanner import get_ocr_reader, extract_text_from_image, parse_food_label, get_ocr_status
+from modules.product_analyzer import analyze_product, calculate_health_score
+from modules.history_manager import (
+    initialize_history, add_to_history, get_history,
+    clear_history, get_history_stats, export_history_json
+)
 
-def add_to_history(state, p, a):
-    state["history"].insert(0, {"product": p, "analysis": a})
-
-def get_history(state):
-    return state.get("history", [])
-
-def clear_history(state):
-    state["history"] = []
-
-def get_history_stats(state):
-    h = state.get("history", [])
-    if not h:
-        return {}
-    scores = [item["analysis"]["health_score"]["score"] for item in h]
-    return {
-        "total_scanned": len(h),
-        "avg_health_score": round(sum(scores) / len(scores), 1),
-        "high_risk_count": sum(1 for s in scores if s < 5)
-    }
-
-def export_history_json(state):
-    return json.dumps(state.get("history", []), ensure_ascii=False, indent=2)
-
-# ════════════════════════════════════════════════════════════════════════
-# 6. MAIN APPLICATION STATE & RUNNER
-# ════════════════════════════════════════════════════════════════════════
+# ============ CSS Инжектиране ============
 st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+
+# ============ Инициализация на сесията ============
 initialize_history(st.session_state)
 
-for key, val in [
-    ("current_analysis", None),
-    ("ocr_reader", None),
-    ("ocr_engine", None),
-    ("ai_analysis", None),
-    ("manual_barcode", ""),
-]:
-    if key not in st.session_state:
-        st.session_state[key] = val
+if "current_analysis" not in st.session_state:
+    st.session_state.current_analysis = None
 
-def load_reader():
+if "ocr_reader" not in st.session_state:
+    st.session_state.ocr_reader = None
+    st.session_state.ocr_engine = None
+
+
+def load_ocr_reader():
+    """Зарежда OCR четеца (с кеширане в сесията)."""
     if st.session_state.ocr_reader is None:
-        r, e = get_ocr_reader()
-        st.session_state.ocr_reader = r
-        st.session_state.ocr_engine = e
+        reader, engine = get_ocr_reader()
+        st.session_state.ocr_reader = reader
+        st.session_state.ocr_engine = engine
     return st.session_state.ocr_reader, st.session_state.ocr_engine
 
-def run_analysis(product_data, source="db"):
+
+def analyze_from_product_data(product_data: dict, source: str = "database"):
+    """
+    Анализира продукт от речник с данни.
+    Добавя source и задейства пълен анализ.
+    """
     product_data["source"] = source
+    
+    # Пълен анализ
     analysis = analyze_product(product_data, product_data.get("ingredients", ""))
+    
+    # Запазваме в сесията
     st.session_state.current_analysis = analysis
-    st.session_state.ai_analysis = None
+    
+    # Добавяме в историята
     add_to_history(st.session_state, product_data, analysis)
+    
     return analysis
 
-def build_product_from_ocr(ocr_result, image_note="📷"):
-    parsed = parse_food_label(ocr_result["raw_text"])
-    return {
-        "name": parsed.get("product_name") or "Продукт от снимка",
-        "brand": "OCR Сканиране",
-        "category": "OCR Сканиране",
-        "image_emoji": image_note,
-        "ingredients": parsed.get("ingredients") or ocr_result["raw_text"],
-        "nutrition": {},
-        "health_risks": {"obesity": "medium", "diabetes": "medium", "heart": "medium", "blood_pressure": "medium"},
-        "alternatives": ["Прясна храна", "Домашно приготвена храна"],
-    }
 
-def show_ocr_panel(ocr_result):
-    if not ocr_result.get("success") or not ocr_result.get("raw_text", "").strip():
-        return
-    found = find_additives_in_text(ocr_result["raw_text"])
-    highlighted = render_ocr_result_with_highlights(ocr_result["raw_text"], found)
-    with st.expander(f"📄 Разпознат текст ({ocr_result.get('confidence', 0):.0%} точност)", expanded=True):
-        st.markdown(f'<div class="ocr-box">{highlighted}</div>', unsafe_allow_html=True)
-        if found:
-            st.markdown(f"🔴 Маркирани **{len(found)}** вредни добавки: " + ", ".join(f"`{a['code']}`" for a in found))
+def get_ai_analysis(product_data: dict) -> str:
+    """
+    Получава AI анализ чрез Anthropic API.
+    """
+    try:
+        product_name = product_data.get("name", "Неизвестен продукт")
+        ingredients = product_data.get("ingredients", "")
+        nutrition = product_data.get("nutrition", {})
+        
+        prompt = f"""Анализирай следния хранителен продукт и дай кратко, ясно мнение на български:
+
+Продукт: {product_name}
+Съставки: {ingredients}
+Калории/100g: {nutrition.get('calories', 'неизвестно')}
+Мазнини/100g: {nutrition.get('fat', 'неизвестно')}g
+Захари/100g: {nutrition.get('sugars', 'неизвестно')}g
+
+Дай:
+1. 🎯 Обща оценка (1-2 изречения)
+2. ⚠️ Главни опасения (макс 3 точки)
+3. 💡 Практични съвети (макс 2 точки)
+
+Бъди конкретен, честен и полезен. Не повтаряй излишно информацията."""
+
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data["content"][0]["text"]
         else:
-            st.markdown("✅ Не са намерени вредни E-числа в текста.")
+            return "⚠️ AI анализът не е наличен в момента."
+            
+    except Exception as e:
+        return f"⚠️ Грешка при AI анализ: {str(e)[:100]}"
 
-def get_ai_analysis(product_data):
-    return "💡 AI Анализът е симулиран, тъй като изисква валиден API ключ към Claude."
 
-# ════════════════════════════════════════════════════════════════════════
-# 7. UI LAYOUT
-# ════════════════════════════════════════════════════════════════════════
+# ============================================================
+# ГЛАВНА НАВИГАЦИЯ
+# ============================================================
+
 render_header()
 
-with st.sidebar:
-    st.markdown("### ⚙️ Системен статус")
-    ocr_st = get_ocr_status()
-    bc_info = get_barcode_info()
-    st.markdown(f"**EasyOCR:** {'✅' if ocr_st['easyocr'] else '❌'}")
-    st.markdown(f"**pyzbar:** {'✅' if bc_info['pyzbar'] else '❌'}")
-    st.markdown("---")
-    st.markdown("### 📖 Как да използвам?")
-    st.markdown(
-        "1. Избери метод за сканиране\n"
-        "2. Качи снимка или въведи баркод\n"
-        "3. Виж резултатите в таб **Резултати**\n"
-        "4. Провери историята в таб **История**"
-    )
+# Основни табове
+tab_scan, tab_results, tab_history, tab_additives = st.tabs([
+    "📷 Сканиране",
+    "📊 Резултати",
+    "📋 История",
+    "🧪 E-та"
+])
 
-tab_scan, tab_results, tab_history, tab_edata = st.tabs(["📷 Сканиране", "📊 Резултати", "📋 История", "🧪 Е-та"])
 
-# ─── TAB: СКАНИРАНЕ ───────────────────────────────────────────────────
+# ============================================================
+# ТАБ 1: СКАНИРАНЕ
+# ============================================================
 with tab_scan:
-    method = st.radio(
-        "Метод",
+    st.markdown("### Как искаш да добавиш продукт?")
+    
+    scan_method = st.radio(
+        "Метод на сканиране",
         ["📦 Демо продукт", "🖼️ Качи снимка", "📷 Камера", "🔢 Въведи баркод"],
         label_visibility="collapsed"
     )
+    
     st.markdown("---")
+    
+    # ---- ДЕМО ПРОДУКТ ----
+    if scan_method == "📦 Демо продукт":
+        st.markdown("""
+        <div class="info-section">
+            <p>🎯 <strong>Избери продукт от нашата демо база данни</strong> за да видиш как работи анализът без нужда от камера или баркод скенер.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        demo_products = get_demo_products()
+        product_options = {f"{p['emoji']} {p['name']} ({p['brand']})": p["barcode"] 
+                         for p in demo_products}
+        
+        selected = st.selectbox(
+            "Избери продукт:",
+            list(product_options.keys())
+        )
+        
+        if st.button("🔍 Анализирай продукта", key="demo_analyze"):
+            barcode = product_options[selected]
+            product_data = get_product_by_barcode(barcode)
+            
+            if product_data:
+                with st.spinner("⚡ Анализираме продукта..."):
+                    product_data["barcode"] = barcode
+                    analysis = analyze_from_product_data(product_data, "demo")
+                
+                st.success(f"✅ {product_data['name']} е анализиран успешно!")
+                st.info("📊 Виж резултатите в таб **'Резултати'**")
+    
+    # ---- КАЧИ СНИМКА ----
+    elif scan_method == "🖼️ Качи снимка":
+        ocr_status = get_ocr_status()
 
-    # ── Демо продукт ──
-    if method == "📦 Демо продукт":
-        opts = {f"{p['emoji']} {p['name']}": p["barcode"] for p in get_demo_products()}
-        sel = st.selectbox("Избери продукт:", list(opts.keys()))
-        if st.button("🔍 Анализирай", key="demo_btn"):
-            bc = opts[sel]
-            with st.spinner("Зареждаме данни..."):
-                p = fetch_openfoodfacts(bc)
-            if p:
-                p["barcode"] = bc
-                run_analysis(p, "demo")
-                st.success(f"✅ {p['name']} анализиран! Виж таб **Резултати**")
+        if not ocr_status["any_available"]:
+            st.warning(
+                "⚠️ **OCR не е инсталиран.** Баркод сканирането работи, "
+                "но разпознаването на текст от снимка изисква:\n\n"
+                "```\npip install easyocr\n```\n\n"
+                "До тогава използвай **Демо продукт** или **Въведи баркод**."
+            )
+
+        st.markdown("""
+        <div class="info-section">
+            <p>📸 <strong>Качи снимка на хранителния етикет</strong> — търсим баркод автоматично, 
+            след това можеш да пуснеш OCR за разпознаване на текст.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        uploaded_file = st.file_uploader(
+            "Качи снимка на етикет",
+            type=["jpg", "jpeg", "png", "webp"],
+            help="Подкрепени формати: JPG, PNG, WebP. Максимум 10MB."
+        )
+
+        if uploaded_file:
+            image = Image.open(uploaded_file)
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.image(image, caption="Качена снимка", use_container_width=True)
+            with col2:
+                st.metric("Ширина", f"{image.width}px")
+                st.metric("Височина", f"{image.height}px")
+
+            st.markdown("---")
+
+            # ---- Стъпка 1: Баркод ----
+            with st.spinner("🔍 Търсим баркод в снимката..."):
+                barcode_result = scan_barcode(image)
+
+            if barcode_result["found"]:
+                st.success(f"✅ Намерен баркод: **{barcode_result['barcode']}** ({barcode_result['barcode_type']})")
+
+                product_data = get_product_by_barcode(barcode_result["barcode"])
+
+                if not product_data:
+                    with st.spinner("🌐 Търсим в Open Food Facts..."):
+                        product_data = fetch_openfoodfacts(barcode_result["barcode"])
+
+                if product_data:
+                    product_data["barcode"] = barcode_result["barcode"]
+                    product_data.setdefault("image_emoji", "🏷️")
+                    with st.spinner("⚡ Анализираме..."):
+                        analyze_from_product_data(product_data, "barcode_scan")
+                    st.success("✅ Готово! Виж таб **'Резултати'**")
+                else:
+                    st.warning(
+                        f"⚠️ Баркод **{barcode_result['barcode']}** не е намерен в базите данни. "
+                        "Опитай OCR по-долу."
+                    )
+
             else:
-                st.error("❌ Не можахме да намерим продукта. Опитай друг.")
+                st.info("ℹ️ Баркод не е открит в снимката.")
 
-    # ── Качи снимка ──
-    elif method == "🖼️ Качи снимка":
-        uploaded = st.file_uploader("Качи снимка на етикета", type=["jpg", "jpeg", "png", "webp"])
-        if uploaded:
-            image = Image.open(uploaded)
-            st.image(image, caption="Качена снимка", width=300)
+            # ---- Стъпка 2: OCR (само ако няма баркод или потребителят иска) ----
+            if not barcode_result["found"]:
+                st.markdown("**Опитай разпознаване на текст (OCR):**")
+
+            if st.button("🔤 Анализирай текста с OCR", key="ocr_analyze",
+                         disabled=not ocr_status["any_available"]):
+                with st.spinner("🤖 Обработваме снимката и разпознаваме текст..."):
+                    reader, engine = load_ocr_reader()
+                    ocr_result = extract_text_from_image(image, reader, engine)
+
+                if ocr_result.get("no_ocr_installed"):
+                    st.error("❌ OCR не е инсталиран. Виж съобщението по-горе.")
+
+                elif ocr_result["success"] and ocr_result["raw_text"].strip():
+                    conf_pct = f"{ocr_result['confidence']:.0%}"
+                    st.success(f"✅ Текстът е разпознат (двигател: **{ocr_result['engine']}**, точност: **{conf_pct}**)")
+
+                    with st.expander("📄 Разпознат текст (кликни за преглед)"):
+                        st.text(ocr_result["raw_text"])
+
+                    parsed = parse_food_label(ocr_result["raw_text"])
+
+                    # Използваме целия OCR текст като съставки ако не е намерена секция
+                    ingredients_text = parsed.get("ingredients") or ocr_result["raw_text"]
+
+                    product_data = {
+                        "name": parsed.get("product_name") or "Продукт от снимка",
+                        "brand": parsed.get("brand") or "",
+                        "category": "OCR Сканиране",
+                        "image_emoji": "📷",
+                        "ingredients": ingredients_text,
+                        "nutrition": parsed.get("nutrition", {}),
+                        "health_risks": {
+                            "obesity": "medium",
+                            "diabetes": "medium",
+                            "heart": "medium",
+                            "blood_pressure": "medium"
+                        },
+                        "alternatives": ["Прясна храна", "Домашно приготвена храна"]
+                    }
+
+                    # Показваме какво е намерено
+                    if parsed.get("e_numbers"):
+                        st.info(f"🧪 Намерени E-числа в текста: **{', '.join(parsed['e_numbers'])}**")
+                    if parsed.get("weight"):
+                        st.info(f"⚖️ Тегло/обем: **{parsed['weight']}**")
+
+                    with st.spinner("⚡ Анализираме продукта..."):
+                        analyze_from_product_data(product_data, "ocr")
+
+                    st.success("✅ Готово! Виж таб **'Резултати'**")
+
+                else:
+                    # Конкретна грешка, без фалшиви данни
+                    err = ocr_result.get("error", "Неизвестна грешка")
+                    st.error(f"❌ OCR не успя да разпознае текст.\n\n**Причина:** {err}")
+                    st.markdown("""
+                    **Съвети за по-добри резултати:**
+                    - 📸 Снимай от по-близо и директно срещу етикета
+                    - 💡 Осигури добро осветление
+                    - 🔲 Снимката трябва да е рязка, не размазана
+                    - 📐 Дръж телефона успоредно на етикета
+                    """)
+    
+    # ---- КАМЕРА ----
+    elif scan_method == "📷 Камера":
+        st.markdown("""
+        <div class="info-section">
+            <p>📱 <strong>Снимай директно с камерата</strong> на устройството си — перфектно за мобилни устройства.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        camera_image = st.camera_input("Насочи камерата към етикета или баркода")
+
+        if camera_image:
+            image = Image.open(camera_image)
 
             with st.spinner("🔍 Търсим баркод..."):
-                bc_res = scan_barcode(image)
+                barcode_result = scan_barcode(image)
 
-            if bc_res["found"]:
-                st.success(f"✅ Намерен баркод: `{bc_res['barcode']}`")
-                with st.spinner("Зареждаме данни от OpenFoodFacts..."):
-                    p = fetch_openfoodfacts(bc_res["barcode"])
-                if p:
-                    p["barcode"] = bc_res["barcode"]
-                    run_analysis(p, "barcode_scan")
-                    st.success("✅ Продуктът е анализиран! Виж таб **Резултати**")
+            if barcode_result["found"]:
+                st.success(f"✅ Намерен баркод: **{barcode_result['barcode']}**")
+
+                product_data = get_product_by_barcode(barcode_result["barcode"])
+                if not product_data:
+                    with st.spinner("🌐 Търсим онлайн..."):
+                        product_data = fetch_openfoodfacts(barcode_result["barcode"])
+
+                if product_data:
+                    product_data["barcode"] = barcode_result["barcode"]
+                    product_data.setdefault("image_emoji", "📷")
+                    with st.spinner("⚡ Анализираме..."):
+                        analyze_from_product_data(product_data, "camera_barcode")
+                    st.success("✅ Готово! Виж таб **'Резултати'**")
                 else:
-                    st.warning("⚠️ Баркодът е намерен, но продуктът не е в базата данни.")
+                    st.warning("⚠️ Продуктът не е намерен. Опитай OCR по-долу.")
             else:
-                st.info("📄 Баркод не е намерен. Опитваме OCR разпознаване на текст...")
-                reader, engine = load_reader()
-                if engine == "easyocr":
-                    with st.spinner("🔤 Разпознаваме текст с EasyOCR..."):
-                        ocr_result = extract_text_easyocr(image, reader)
+                st.info("ℹ️ Баркод не е открит — опитай OCR.")
+
+            ocr_status = get_ocr_status()
+
+            if st.button("🔤 Анализирай текста с OCR", key="camera_ocr_btn",
+                         disabled=not ocr_status["any_available"]):
+                with st.spinner("🤖 OCR разпознаване..."):
+                    reader, engine = load_ocr_reader()
+                    ocr_result = extract_text_from_image(image, reader, engine)
+
+                if ocr_result["success"] and ocr_result["raw_text"].strip():
+                    parsed = parse_food_label(ocr_result["raw_text"])
+                    ingredients_text = parsed.get("ingredients") or ocr_result["raw_text"]
+
+                    product_data = {
+                        "name": parsed.get("product_name") or "Сниман продукт",
+                        "brand": parsed.get("brand") or "",
+                        "category": "Камера скан",
+                        "image_emoji": "📷",
+                        "ingredients": ingredients_text,
+                        "nutrition": parsed.get("nutrition", {}),
+                        "health_risks": {"obesity": "medium", "diabetes": "medium",
+                                         "heart": "medium", "blood_pressure": "medium"},
+                        "alternatives": ["Прясна храна"]
+                    }
+                    with st.spinner("⚡ Анализираме..."):
+                        analyze_from_product_data(product_data, "camera_ocr")
+                    st.success("✅ Готово! Виж таб **'Резултати'**")
                 else:
-                    ocr_result = extract_text_claude_vision(image)
-
-                if ocr_result.get("success"):
-                    show_ocr_panel(ocr_result)
-                    product_data = build_product_from_ocr(ocr_result)
-                    run_analysis(product_data, "ocr")
-                    st.success("✅ Анализът е готов! Виж таб **Резултати**")
-                else:
-                    st.error(f"❌ OCR грешка: {ocr_result.get('error', 'Неизвестна грешка')}")
-                    st.info("💡 Инсталирай EasyOCR: `pip install easyocr`")
-
-    # ── Камера ──
-    elif method == "📷 Камера":
-        st.info("📷 Използвай камерата за снимка на етикета")
-        camera_img = st.camera_input("Снимай етикета")
-        if camera_img:
-            image = Image.open(camera_img)
-
-            with st.spinner("🔍 Обработваме снимката..."):
-                bc_res = scan_barcode(image)
-
-            if bc_res["found"]:
-                st.success(f"✅ Намерен баркод: `{bc_res['barcode']}`")
-                with st.spinner("Зареждаме данни..."):
-                    p = fetch_openfoodfacts(bc_res["barcode"])
-                if p:
-                    p["barcode"] = bc_res["barcode"]
-                    run_analysis(p, "camera_scan")
-                    st.success("✅ Продуктът е анализиран! Виж таб **Резултати**")
-                else:
-                    st.warning("⚠️ Продуктът не е намерен в базата данни.")
-            else:
-                reader, engine = load_reader()
-                if engine == "easyocr":
-                    with st.spinner("🔤 OCR разпознаване..."):
-                        ocr_result = extract_text_easyocr(image, reader)
-                    if ocr_result.get("success"):
-                        show_ocr_panel(ocr_result)
-                        product_data = build_product_from_ocr(ocr_result, "📷")
-                        run_analysis(product_data, "ocr_camera")
-                        st.success("✅ Анализът е готов! Виж таб **Резултати**")
-                    else:
-                        st.error("❌ Не можахме да разпознаем текст от снимката.")
-                else:
-                    st.warning("⚠️ EasyOCR не е инсталиран. Инсталирай го: `pip install easyocr`")
-
-    # ── Въведи баркод ──
-    elif method == "🔢 Въведи баркод":
-        st.markdown("**Въведи баркод ръчно:**")
+                    err = ocr_result.get("error", "Не е разпознат текст")
+                    st.error(f"❌ {err}")
+                    if not ocr_status["any_available"]:
+                        st.info("💡 Инсталирай EasyOCR: `pip install easyocr`")
+    
+    # ---- РЪЧЕН БАРКОД ----
+    elif scan_method == "🔢 Въведи баркод":
+        st.markdown("""
+        <div class="info-section">
+            <p>⌨️ <strong>Въведи баркода ръчно</strong> — търсим в демо базата и Open Food Facts.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
         barcode_input = st.text_input(
-            "Баркод (EAN-13):",
-            value=st.session_state.manual_barcode,
-            placeholder="напр. 5449000000996",
-            key="barcode_text_input"
+            "Въведи баркода (EAN-13, EAN-8, UPC-A):",
+            placeholder="Напр: 5449000000996",
+            max_chars=20
         )
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔍 Търси", key="search_barcode_btn"):
-                if barcode_input.strip():
-                    st.session_state.manual_barcode = barcode_input.strip()
-                    with st.spinner("Зареждаме данни..."):
-                        p = fetch_openfoodfacts(barcode_input.strip())
-                    if p:
-                        p["barcode"] = barcode_input.strip()
-                        run_analysis(p, "manual")
-                        st.success(f"✅ **{p['name']}** намерен! Виж таб **Резултати**")
-                    else:
-                        st.error("❌ Продуктът не е намерен в OpenFoodFacts.")
-                else:
-                    st.warning("⚠️ Моля въведи баркод.")
-        with col2:
-            if st.button("🗑️ Изчисти", key="clear_barcode_btn"):
-                st.session_state.manual_barcode = ""
-                st.rerun()
+        
+        st.markdown("**Демо баркодове за тестване:**")
+        demo_cols = st.columns(2)
+        for i, (bc, name) in enumerate(DEMO_BARCODES.items()):
+            with demo_cols[i % 2]:
+                if st.button(f"`{bc}`\n{name}", key=f"demo_bc_{bc}"):
+                    barcode_input = bc
+                    st.session_state.manual_barcode = bc
+        
+        actual_barcode = barcode_input or st.session_state.get("manual_barcode", "")
+        
+        if actual_barcode and st.button("🔍 Търси продукт", key="manual_search"):
+            with st.spinner(f"🔍 Търсим {actual_barcode}..."):
+                product_data = get_product_by_barcode(actual_barcode)
+                
+                if not product_data:
+                    st.info("ℹ️ Не е намерен локално — търсим в Open Food Facts...")
+                    product_data = fetch_openfoodfacts(actual_barcode)
+            
+            if product_data:
+                product_data["barcode"] = actual_barcode
+                product_data.setdefault("image_emoji", "🏷️")
+                
+                analysis = analyze_from_product_data(product_data, "manual_barcode")
+                st.success(f"✅ Намерен: **{product_data['name']}**! Виж таб **'Резултати'**")
+            else:
+                st.error(f"❌ Продукт с баркод **{actual_barcode}** не е намерен.")
+                st.info("💡 Опитай с демо баркод: `5449000000996` (Coca-Cola)")
 
-        st.markdown("---")
-        st.markdown("**Демо баркодове за тест:**")
-        for bc, name in DEMO_BARCODES.items():
-            if st.button(f"📦 {name} ({bc})", key=f"demo_{bc}"):
-                with st.spinner(f"Зареждаме {name}..."):
-                    p = fetch_openfoodfacts(bc)
-                if p:
-                    p["barcode"] = bc
-                    run_analysis(p, "demo_barcode")
-                    st.success(f"✅ {name} анализиран! Виж таб **Резултати**")
-                else:
-                    st.error("❌ Грешка при зареждане.")
 
-# ─── TAB: РЕЗУЛТАТИ ───────────────────────────────────────────────────
+# ============================================================
+# ТАБ 2: РЕЗУЛТАТИ
+# ============================================================
 with tab_results:
-    analysis = st.session_state.current_analysis
-
-    if analysis is None:
-        st.markdown(
-            "<div class='info-box'>ℹ️ Все още няма анализ. Използвай таб <strong>📷 Сканиране</strong>, за да сканираш продукт.</div>",
-            unsafe_allow_html=True
-        )
+    if st.session_state.current_analysis is None:
+        st.markdown("""
+        <div style="text-align:center; padding: 60px 20px; color: #8896B0;">
+            <div style="font-size: 64px; margin-bottom: 16px;">🔍</div>
+            <h3 style="color: #8896B0 !important;">Все още няма анализиран продукт</h3>
+            <p>Отиди в таб <strong style="color: #00B894;">Сканиране</strong> и избери или сканирай продукт</p>
+        </div>
+        """, unsafe_allow_html=True)
     else:
+        analysis = st.session_state.current_analysis
         product = analysis["product"]
-        hs = analysis["health_score"]
-        additives = analysis["additives"]
-        nutrition = analysis["nutrition_analysis"]
-
-        # Заглавие на продукта
+        health_score = analysis["health_score"]
+        additives_data = analysis["additives"]
+        nutrition_analysis = analysis["nutrition_analysis"]
+        
+        # ---- ХЕДЪР НА ПРОДУКТА ----
         render_product_header(
-            product.get("name", "Неизвестен"),
+            product.get("name", "Неизвестен продукт"),
             product.get("brand", ""),
             product.get("category", ""),
             product.get("image_emoji", "🍽️")
         )
-
-        # Здравна оценка
-        render_section_title("💯", "Здравна оценка")
-        render_health_score(hs["score"], hs["label"], hs["color"], hs["emoji"])
-
-        # NutriScore
-        nutriscore = product.get("nutriscore", "u")
-        if nutriscore and nutriscore != "u":
-            ns_color = get_nutriscore_color(nutriscore)
-            st.markdown(
-                f"<div style='text-align:center; margin-bottom:16px;'>"
-                f"<span style='background:{ns_color}; color:white; padding:8px 20px; border-radius:8px; font-size:1.4em; font-weight:bold;'>"
-                f"NutriScore: {nutriscore.upper()}</span></div>",
-                unsafe_allow_html=True
+        
+        # ---- ЗДРАВНА ОЦЕНКА ----
+        render_section_title("🏥", "Здравна оценка")
+        render_health_score(
+            health_score["score"],
+            health_score["label"],
+            health_score["color"],
+            health_score["emoji"]
+        )
+        
+        # ---- МЕТРИКИ ----
+        col1, col2, col3 = st.columns(3)
+        
+        nutrition = product.get("nutrition", {})
+        with col1:
+            calories = nutrition.get("calories", 0)
+            st.metric("🔥 Калории", f"{calories:.0f} kcal", help="на 100g")
+        with col2:
+            fat = nutrition.get("fat", 0)
+            st.metric("🫧 Мазнини", f"{fat:.1f}g", help="на 100g")
+        with col3:
+            sugars = nutrition.get("sugars", 0)
+            st.metric("🍬 Захари", f"{sugars:.1f}g", help="на 100g")
+        
+        st.markdown("---")
+        
+        # ---- ХРАНИТЕЛНИ СТОЙНОСТИ ----
+        render_section_title("📈", "Хранителни стойности (на 100g)")
+        
+        for item in nutrition_analysis:
+            render_nutrition_bar(
+                item["nutrient"],
+                item["value"],
+                item["unit"],
+                item["percentage_daily"],
+                item["color"]
             )
-
-        # Хранителни стойности
-        if nutrition:
-            render_section_title("🥗", "Хранителни стойности (на 100г)")
-            for item in nutrition:
-                render_nutrition_bar(item["nutrient"], item["value"], item["unit"], item["percentage_daily"], item["color"])
-
-        # Здравни рискове
-        render_section_title("🏥", "Здравни рискове")
-        health_risks = product.get("health_risks", {})
-        cols = st.columns(2)
-        for i, (key, info) in enumerate(HEALTH_RISK_INFO.items()):
-            lvl = health_risks.get(key, "low")
-            color = RISK_COLORS.get(lvl, "#34C759")
-            desc = info.get(lvl, "")
-            with cols[i % 2]:
-                st.markdown(
-                    f"<div style='text-align:center; padding:10px; border-radius:8px; border: 2px solid {color}; margin-bottom:8px;'>"
-                    f"<div style='font-size:1.5em;'>{info['emoji']}</div>"
-                    f"<strong>{info['name']}</strong><br>"
-                    f"<span style='color:{color}; font-size:0.85em;'>{desc}</span></div>",
-                    unsafe_allow_html=True
+        
+        if not nutrition_analysis:
+            st.info("ℹ️ Хранителните стойности не са налични за този продукт.")
+        
+        st.markdown("---")
+        
+        # ---- ВРЕДНИ ДОБАВКИ ----
+        render_section_title("🧪", f"Хранителни добавки ({additives_data['count']} намерени)")
+        
+        found_additives = additives_data["found"]
+        
+        if found_additives:
+            # Обща оценка на добавките
+            risk = additives_data["risk"]
+            st.markdown(f"""
+            <div class="food-card" style="border-left: 4px solid {risk['color']}; margin-bottom: 16px;">
+                <div style="font-size: 16px; font-weight: 700; color: {risk['color']};">{risk['label']}</div>
+                <div style="font-size: 13px; color: #8896B0; margin-top: 4px;">{len(found_additives)} добавки открити в съставките</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Бадж за всяка добавка
+            st.markdown('<div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px;">', unsafe_allow_html=True)
+            for additive in found_additives:
+                render_additive_badge(
+                    additive["code"],
+                    additive["name"],
+                    additive["risk_level"]
                 )
-
-        # Добавки
-        render_section_title("🧪", f"Добавки ({additives['count']} намерени)")
-        if additives["found"]:
-            for a in additives["found"]:
-                lvl = a["risk_level"]
-                label = RISK_LABELS.get(lvl, lvl)
-                color = RISK_COLORS.get(lvl, "#888")
-                with st.expander(f"{label} — {a['code']} {a['name']}"):
-                    st.markdown(f"**Категория:** {a['category']}")
-                    st.markdown(f"**Описание:** {a['description']}")
-                    if a.get("health_risks"):
-                        st.markdown("**Рискове за здравето:** " + ", ".join(a["health_risks"]))
-                    if a.get("banned_in"):
-                        st.markdown("**Забранен в:** " + ", ".join(a["banned_in"]))
-                    if a.get("alternatives"):
-                        st.markdown(f"**Алтернативи:** {a['alternatives']}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Детайли за всяка добавка
+            for additive in found_additives:
+                risk_color = RISK_COLORS.get(additive["risk_level"], "#888")
+                risk_label = RISK_LABELS.get(additive["risk_level"], "")
+                
+                with st.expander(f"📋 {additive['code']} — {additive['name']} {risk_label}"):
+                    st.markdown(f"""
+                    <div style="padding: 8px 0;">
+                        <div style="color: #8896B0; font-size: 13px; margin-bottom: 12px;">
+                            📂 <strong>Категория:</strong> {additive['category']}
+                        </div>
+                        <div style="color: #F0F4FF; font-size: 14px; margin-bottom: 12px; line-height: 1.5;">
+                            ℹ️ {additive['description']}
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <div style="color: {risk_color}; font-weight: 700; font-size: 14px; margin-bottom: 8px;">
+                                ⚠️ Здравни рискове:
+                            </div>
+                            {"".join([f'<div style="color: #8896B0; font-size: 13px; padding: 3px 0;">• {risk}</div>' for risk in additive['health_risks']])}
+                        </div>
+                        {"<div style='color: #8896B0; font-size: 13px; margin-top: 10px;'>🚫 <strong>Забранен в:</strong> " + ", ".join(additive['banned_in']) + "</div>" if additive.get('banned_in') else ""}
+                        {"<div style='color: #00D4AA; font-size: 13px; margin-top: 8px;'>🌿 <strong>Алтернативи:</strong> " + additive.get('alternatives', '') + "</div>" if additive.get('alternatives') else ""}
+                    </div>
+                    """, unsafe_allow_html=True)
         else:
-            st.success("✅ Не са намерени вредни добавки!")
-
-        # Съставки
+            st.markdown("""
+            <div class="food-card" style="border-left: 4px solid #00C853; text-align: center; padding: 24px;">
+                <div style="font-size: 36px; margin-bottom: 8px;">✅</div>
+                <div style="color: #00C853; font-weight: 700; font-size: 16px;">Без известни вредни добавки</div>
+                <div style="color: #8896B0; font-size: 13px; margin-top: 4px;">Не са намерени E-та с висок риск в съставките</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # ---- ЗДРАВНИ РИСКОВЕ ----
+        render_section_title("❤️", "Здравни рискове")
+        
+        health_risks = product.get("health_risks", {})
+        
+        for risk_key, risk_info in HEALTH_RISK_INFO.items():
+            level = health_risks.get(risk_key, "low")
+            description = risk_info.get(level, "Няма информация.")
+            
+            render_risk_card(
+                risk_info["name"],
+                risk_info["emoji"],
+                level,
+                description
+            )
+        
+        st.markdown("---")
+        
+        # ---- АЛТЕРНАТИВИ ----
+        alternatives = product.get("alternatives", [])
+        if alternatives:
+            render_section_title("🌿", "По-здравословни алтернативи")
+            
+            st.markdown("""
+            <div class="info-section">
+                <p>💡 Вместо <strong>{}</strong>, опитай:</p>
+            </div>
+            """.format(product.get("name", "този продукт")), unsafe_allow_html=True)
+            
+            render_alternatives(alternatives)
+        
+        st.markdown("---")
+        
+        # ---- СЪСТАВКИ ----
         ingredients = product.get("ingredients", "")
         if ingredients:
-            with st.expander("📋 Пълен списък съставки"):
-                st.write(ingredients)
-
-        # Алтернативи
-        alts = product.get("alternatives", [])
-        if alts:
-            render_section_title("🌿", "По-здравословни алтернативи")
-            render_alternatives(alts)
-
-        # AI анализ
-        render_section_title("🤖", "AI Анализ")
-        if st.button("🔬 Генерирай AI анализ", key="ai_btn"):
-            with st.spinner("AI анализира продукта..."):
+            with st.expander("📄 Пълен списък със съставки"):
+                # Маркираме E-числата в текста
+                st.markdown(f"""
+                <div style="font-size: 13px; color: #8896B0; line-height: 1.8; padding: 8px 0;">
+                    {ingredients}
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # ---- AI АНАЛИЗ (бутон) ----
+        st.markdown("---")
+        render_section_title("🤖", "AI Дълбок анализ")
+        
+        if "ai_analysis" not in st.session_state:
+            st.session_state.ai_analysis = None
+        
+        if st.button("✨ Получи AI анализ", key="ai_btn"):
+            with st.spinner("🤖 Claude анализира продукта..."):
                 ai_text = get_ai_analysis(product)
                 st.session_state.ai_analysis = ai_text
+        
         if st.session_state.ai_analysis:
-            st.info(st.session_state.ai_analysis)
+            st.markdown(f"""
+            <div class="food-card" style="border-left: 4px solid #6C5CE7;">
+                <div style="color: #F0F4FF; font-size: 14px; line-height: 1.7; white-space: pre-line;">
+                    {st.session_state.ai_analysis}
+                </div>
+                <div style="color: #8896B0; font-size: 11px; margin-top: 12px;">
+                    🤖 Анализиран от Claude AI
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # ---- ОЦЕНКА НА РАЗБИВКАТА ----
+        breakdown = health_score.get("breakdown", [])
+        if breakdown:
+            with st.expander("📊 Как е изчислена оценката?"):
+                for item in breakdown:
+                    pts = item["points"]
+                    color = "#FF3B30" if pts > 1 else "#FF9500" if pts > 0 else "#34C759"
+                    icon = "🔴" if pts > 1 else "🟡" if pts > 0 else "🟢"
+                    st.markdown(f"""
+                    <div style="display:flex; justify-content:space-between; align-items:center; 
+                               padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        <span style="color: #F0F4FF; font-size: 13px;">{icon} {item['factor']}</span>
+                        <span style="color: {color}; font-weight: 700; font-size: 14px;">+{pts:.1f}т | {item['note']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+        
+        # Nutri-Score ако е наличен
+        nutriscore = product.get("nutriscore", "")
+        if nutriscore and nutriscore in "ABCDE":
+            color = get_nutriscore_color(nutriscore)
+            st.markdown(f"""
+            <div style="display:flex; align-items:center; gap:12px; margin-top:16px; padding: 12px 16px;
+                       background: rgba(255,255,255,0.04); border-radius: 14px; border: 1px solid rgba(255,255,255,0.08);">
+                <div style="background: {color}; color: white; font-weight: 900; font-size: 24px;
+                           width: 48px; height: 48px; display:flex; align-items:center; justify-content:center;
+                           border-radius: 12px;">{nutriscore}</div>
+                <div>
+                    <div style="color: #F0F4FF; font-weight: 700;">Nutri-Score</div>
+                    <div style="color: #8896B0; font-size: 13px;">Официална европейска оценка</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-# ─── TAB: ИСТОРИЯ ────────────────────────────────────────────────────
+
+# ============================================================
+# ТАБ 3: ИСТОРИЯ
+# ============================================================
 with tab_history:
-    render_section_title("📋", "История на сканиранията")
     history = get_history(st.session_state)
     stats = get_history_stats(st.session_state)
-
+    
     if not history:
-        st.markdown(
-            "<div class='info-box'>📭 Историята е празна. Сканирай продукт, за да започнеш.</div>",
-            unsafe_allow_html=True
-        )
+        st.markdown("""
+        <div style="text-align:center; padding: 60px 20px; color: #8896B0;">
+            <div style="font-size: 64px; margin-bottom: 16px;">📋</div>
+            <h3 style="color: #8896B0 !important;">Историята е празна</h3>
+            <p>Сканирай продукти и те ще се появят тук</p>
+        </div>
+        """, unsafe_allow_html=True)
     else:
         # Статистики
+        render_section_title("📊", "Твоята статистика")
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("📦 Сканирани", stats.get("total_scanned", 0))
+            st.metric("Сканирани", stats.get("total_scanned", 0), help="Общо сканирани продукти")
         with col2:
-            st.metric("⭐ Средна оценка", stats.get("avg_health_score", 0))
+            avg = stats.get("avg_health_score", 0)
+            st.metric("Средна оценка", f"{avg}/10", help="Средна оценка на вредност")
         with col3:
-            st.metric("⛔ Рискови", stats.get("high_risk_count", 0))
-
+            st.metric("Рискови", stats.get("high_risk_count", 0), help="Продукти с оценка ≥ 7")
+        
+        if stats.get("worst_product"):
+            st.markdown(f"""
+            <div class="info-section" style="border-color: rgba(255,59,48,0.3); background: rgba(255,59,48,0.08);">
+                <p>⛔ <strong>Най-вреден скениран продукт:</strong> {stats['worst_product']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        if stats.get("best_product"):
+            st.markdown(f"""
+            <div class="info-section">
+                <p>✅ <strong>Най-здравословен:</strong> {stats['best_product']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
         st.markdown("---")
-
-        for i, entry in enumerate(history):
-            score = entry["analysis"]["health_score"]["score"]
-            color = entry["analysis"]["health_score"]["color"]
-            name = entry["product"].get("name", "Неизвестен")
-            brand = entry["product"].get("brand", "")
-            source = entry["product"].get("source", "")
-            with st.expander(f"{'🍽️'} {name} — {score}/10"):
-                st.markdown(f"**Марка:** {brand}")
-                st.markdown(f"**Оценка:** <span style='color:{color}; font-weight:bold;'>{score}/10</span>", unsafe_allow_html=True)
-                st.markdown(f"**Източник:** {source}")
-                additives_count = entry["analysis"]["additives"]["count"]
-                st.markdown(f"**Добавки:** {additives_count}")
-                if st.button(f"📊 Зареди резултати", key=f"load_hist_{i}"):
-                    st.session_state.current_analysis = entry["analysis"]
-                    st.info("✅ Резултатите са заредени в таб **Резултати**")
-
+        render_section_title("📋", f"Последно сканирани ({len(history)})")
+        
+        for entry in history:
+            render_history_card(entry)
+        
         st.markdown("---")
+        
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🗑️ Изчисти история", key="clear_hist_btn"):
+            if st.button("🗑️ Изчисти историята"):
                 clear_history(st.session_state)
                 st.rerun()
         with col2:
             json_data = export_history_json(st.session_state)
             st.download_button(
-                "💾 Експортирай JSON",
-                data=json_data,
-                file_name="foodscan_history.json",
-                mime="application/json",
-                key="export_btn"
+                "📥 Изтегли JSON",
+                json_data,
+                "scan_history.json",
+                "application/json"
             )
 
-# ─── TAB: Е-ТА ───────────────────────────────────────────────────────
-with tab_edata:
-    render_section_title("🧪", "База данни с Е-добавки")
 
-    search_query = st.text_input("🔍 Търси добавка (код или име):", placeholder="напр. E621 или глутамат")
-
-    filtered = {}
-    if search_query:
-        q = search_query.lower()
-        filtered = {
-            code: data for code, data in HARMFUL_ADDITIVES.items()
-            if q in code.lower() or q in data["name"].lower() or q in data["category"].lower()
+# ============================================================
+# ТАБ 4: РЕЧНИК НА E-ТА
+# ============================================================
+with tab_additives:
+    st.markdown("### 🧪 Пълен речник на Е-добавките")
+    st.markdown("""
+    <div class="info-section">
+        <p>📚 Изчерпателна база данни с <strong>{} вредни добавки</strong> — оцветители, консерванти, усилватели на вкус и подсладители.</p>
+    </div>
+    """.format(len(HARMFUL_ADDITIVES)), unsafe_allow_html=True)
+    
+    # Филтри
+    col1, col2 = st.columns(2)
+    with col1:
+        categories = list(set(a["category"] for a in HARMFUL_ADDITIVES.values()))
+        selected_category = st.selectbox("📂 Категория", ["Всички"] + sorted(categories))
+    with col2:
+        risk_levels = ["Всички", "high", "medium-high", "medium", "low-medium", "low"]
+        risk_labels_ui = {
+            "Всички": "Всички",
+            "high": "⛔ Много вредни",
+            "medium-high": "🔴 Вредни",
+            "medium": "🟡 Умерено вредни",
+            "low-medium": "🟢 Ниска опасност",
+            "low": "✅ Безопасни"
         }
-        if not filtered:
-            st.warning("⚠️ Няма намерени добавки за това търсене.")
-    else:
-        filtered = HARMFUL_ADDITIVES
-
-    # Филтър по риск
-    risk_filter = st.multiselect(
-        "Филтър по ниво на риск:",
-        options=["high", "medium-high", "medium", "low-medium", "low"],
-        format_func=lambda x: RISK_LABELS.get(x, x),
-        default=[]
-    )
-    if risk_filter:
-        filtered = {code: data for code, data in filtered.items() if data["risk_level"] in risk_filter}
-
-    st.markdown(f"**Показани:** {len(filtered)} добавки")
+        selected_risk = st.selectbox("⚠️ Ниво на риск", 
+                                      list(risk_labels_ui.keys()),
+                                      format_func=lambda x: risk_labels_ui[x])
+    
+    search_term = st.text_input("🔍 Търси по E-номер или наименование:", placeholder="Напр: E621, аспартам...")
+    
     st.markdown("---")
-
-    for code, data in filtered.items():
-        lvl = data["risk_level"]
-        label = RISK_LABELS.get(lvl, lvl)
-        color = RISK_COLORS.get(lvl, "#888")
-        with st.expander(f"{label} — **{code}** {data['name']}"):
-            col1, col2 = st.columns(2)
+    
+    # Показваме добавките
+    shown = 0
+    for code, data in HARMFUL_ADDITIVES.items():
+        # Прилагаме филтри
+        if selected_category != "Всички" and data["category"] != selected_category:
+            continue
+        if selected_risk != "Всички" and data["risk_level"] != selected_risk:
+            continue
+        if search_term and search_term.lower() not in code.lower() and search_term.lower() not in data["name"].lower():
+            continue
+        
+        shown += 1
+        risk_color = RISK_COLORS.get(data["risk_level"], "#888")
+        risk_label = RISK_LABELS.get(data["risk_level"], "")
+        
+        with st.expander(f"{risk_label} **{code}** — {data['name']} ({data['category']})"):
+            col1, col2 = st.columns([2, 1])
+            
             with col1:
-                st.markdown(f"**Категория:** {data['category']}")
-                st.markdown(f"**Описание:** {data['description']}")
-                if data.get("health_risks"):
-                    st.markdown("**Здравни рискове:**")
-                    for r in data["health_risks"]:
-                        st.markdown(f"  - ⚠️ {r}")
+                st.markdown(f"""
+                <div style="padding: 4px 0;">
+                    <p style="color: #F0F4FF; font-size: 14px; line-height: 1.6; margin-bottom: 12px;">
+                        ℹ️ {data['description']}
+                    </p>
+                    <div style="margin-bottom: 12px;">
+                        <strong style="color: {risk_color}; font-size: 13px;">⚠️ Здравни рискове:</strong>
+                        {"".join([f'<div style="color: #8896B0; font-size: 13px; padding: 2px 0; padding-left: 16px;">• {r}</div>' for r in data['health_risks']])}
+                    </div>
+                    {"<div style='margin-bottom: 8px;'><strong style='color: #FF6B6B; font-size: 13px;'>🚫 Забранен в:</strong> <span style='color: #8896B0; font-size: 13px;'>" + ", ".join(data['banned_in']) + "</span></div>" if data.get('banned_in') else ""}
+                    {"<div><strong style='color: #00D4AA; font-size: 13px;'>🌿 Алтернативи:</strong> <span style='color: #8896B0; font-size: 13px;'>" + data.get('alternatives', '') + "</span></div>" if data.get('alternatives') else ""}
+                </div>
+                """, unsafe_allow_html=True)
+            
             with col2:
+                st.markdown(f"""
+                <div style="text-align: center; padding: 16px; background: rgba(255,255,255,0.04); 
+                           border-radius: 14px; border: 1px solid {risk_color}33;">
+                    <div style="font-size: 36px; font-weight: 900; color: {risk_color}; font-family: 'Space Grotesk';">
+                        {data['risk_score']}
+                    </div>
+                    <div style="font-size: 11px; color: #8896B0; margin-top: 4px;">Риск скор /10</div>
+                    <div style="margin-top: 12px;">
+                        {"".join([
+                            f'<div style="width: 10px; height: 10px; border-radius: 50%; margin: 4px auto; background: {"" if i > data["risk_score"] else risk_color}; background-color: {risk_color if i <= data["risk_score"] else "rgba(255,255,255,0.08)"}"></div>'
+                            for i in range(10, 0, -1)
+                        ])}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
                 if data.get("found_in"):
-                    st.markdown("**Среща се в:**")
-                    for f in data["found_in"]:
-                        st.markdown(f"  - 🍕 {f}")
-                if data.get("banned_in"):
-                    st.markdown("**Забранен в:** " + ", ".join(data["banned_in"]))
-                if data.get("alternatives"):
-                    st.markdown(f"**Алтернативи:** 🌿 {data['alternatives']}")
+                    st.markdown(f"""
+                    <div style="margin-top: 12px; padding: 12px; background: rgba(255,255,255,0.03); border-radius: 12px;">
+                        <div style="color: #8896B0; font-size: 11px; font-weight: 700; text-transform: uppercase; 
+                                   letter-spacing: 0.5px; margin-bottom: 8px;">Среща се в:</div>
+                        {"".join([f'<div style="color: #8896B0; font-size: 12px; padding: 2px 0;">• {f}</div>' for f in data['found_in'][:4]])}
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+    if shown == 0:
+        st.info("ℹ️ Няма намерени добавки с тези критерии.")
+    else:
+        st.markdown(f"""
+        <div style="text-align: center; color: #8896B0; font-size: 13px; padding: 16px; margin-top: 8px;">
+            Показани {shown} от {len(HARMFUL_ADDITIVES)} добавки
+        </div>
+        """, unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown(
-        "<div class='info-box'>ℹ️ Тази база данни е образователна. "
-        "Консултирайте се с лекар или диетолог за медицински съвети.</div>",
-        unsafe_allow_html=True
-    )
+
+# ============================================================
+# FOOTER
+# ============================================================
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #8896B0; font-size: 12px; padding: 16px 0;">
+    <div style="margin-bottom: 8px;">
+        🔍 <strong style="color: #00B894;">FoodScan AI</strong> — Анализатор на хранителни продукти
+    </div>
+    <div>
+        Данните са за информационни цели. Консултирайте се с диетолог за персонализирани съвети.
+    </div>
+    <div style="margin-top: 8px;">
+        🌐 Данни: Open Food Facts • 🤖 AI: Claude by Anthropic • 📊 E-та: EU Food Additives Database
+    </div>
+</div>
+""", unsafe_allow_html=True)
